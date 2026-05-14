@@ -1,0 +1,219 @@
+diff --git a/Makefile b/Makefile
+index 3ad88b3..dfa1a85 100644
+--- a/Makefile
++++ b/Makefile
+@@ -21,6 +21,8 @@ MALLOC_DIR = mallocng
+ SRC_DIRS = $(addprefix $(srcdir)/,src/* src/malloc/$(MALLOC_DIR) crt ldso $(COMPAT_SRC_DIRS))
+ BASE_GLOBS = $(addsuffix /*.c,$(SRC_DIRS))
+ ARCH_GLOBS = $(addsuffix /$(ARCH)/*.[csS],$(SRC_DIRS))
++MALLOC_COMPILER_INCLUDE = $(shell $(CC) -print-file-name=include)
++MALLOC_EXTRA_CFLAGS = $(if $(filter mimalloc,$(MALLOC_DIR)),-I$(srcdir)/src/malloc/mimalloc/upstream/include -isystem $(MALLOC_COMPILER_INCLUDE))
+ BASE_SRCS = $(sort $(wildcard $(BASE_GLOBS)))
+ ARCH_SRCS = $(sort $(wildcard $(ARCH_GLOBS)))
+ BASE_OBJS = $(patsubst $(srcdir)/%,%.o,$(basename $(BASE_SRCS)))
+@@ -49,6 +51,7 @@ CFLAGS_C99FSE = -std=c99 -ffreestanding -nostdinc
+ CFLAGS_ALL = $(CFLAGS_C99FSE)
+ CFLAGS_ALL += -D_XOPEN_SOURCE=700 -I$(srcdir)/arch/$(ARCH) -I$(srcdir)/arch/generic -Iobj/src/internal -I$(srcdir)/src/include -I$(srcdir)/src/internal -Iobj/include -I$(srcdir)/include
+ CFLAGS_ALL += $(CPPFLAGS) $(CFLAGS_AUTO) $(CFLAGS)
++CFLAGS_ALL += $(MALLOC_EXTRA_CFLAGS)
+ 
+ LDFLAGS_ALL = $(LDFLAGS_AUTO) $(LDFLAGS)
+ 
+@@ -131,6 +134,11 @@ $(CRT_OBJS): CFLAGS_ALL += -DCRT
+ 
+ $(LOBJS) $(LDSO_OBJS): CFLAGS_ALL += -fPIC
+ 
++ifneq ($(filter mimalloc,$(MALLOC_DIR)),)
++obj/src/malloc/calloc.lo: CFLAGS_ALL += -DLIBC_CALLOC_EXTERNAL
++obj/src/malloc/libc_calloc.lo: CFLAGS_ALL += -DLIBC_CALLOC_EXTERNAL
++endif
++
+ CC_CMD = $(CC) $(CFLAGS_ALL) -c -o $@ $<
+ 
+ # Choose invocation of assembler to be used
+diff --git a/ldso/dynlink.c b/ldso/dynlink.c
+index 715948f..1ec48d8 100644
+--- a/ldso/dynlink.c
++++ b/ldso/dynlink.c
+@@ -1492,6 +1492,7 @@ void __libc_exit_fini()
+ 			fpaddr(p, dyn[DT_FINI])();
+ #endif
+ 	}
++	__malloc_tls_teardown(self);
+ }
+ 
+ void __ldso_atfork(int who)
+@@ -1826,6 +1827,8 @@ void __dls3(size_t *sp, size_t *auxv)
+ 	/* Activate error handler function */
+ 	error = error_impl;
+ 
++	__malloc_init(__pthread_self());
++
+ 	/* If the main program was already loaded by the kernel,
+ 	 * AT_PHDR will point to some location other than the dynamic
+ 	 * linker's program headers. */
+@@ -2029,9 +2032,16 @@ void __dls3(size_t *sp, size_t *auxv)
+ 	/* Actual copying to new TLS needs to happen after relocations,
+ 	 * since the TLS images might have contained relocated addresses. */
+ 	if (initial_tls != builtin_tls) {
+-		if (__init_tp(__copy_tls(initial_tls)) < 0) {
++		void *mtls = __pthread_self()->malloc_tls;
++		void *mcache = __pthread_self()->malloc_cache;
++		void *mmain = __pthread_self()->malloc_main;
++		pthread_t self = __copy_tls(initial_tls);
++		if (__init_tp(self) < 0) {
+ 			a_crash();
+ 		}
++		self->malloc_tls = mtls;
++		self->malloc_cache = mcache;
++		self->malloc_main = mmain;
+ 	} else {
+ 		size_t tmp_tls_size = libc.tls_size;
+ 		pthread_t self = __pthread_self();
+diff --git a/src/env/__init_tls.c b/src/env/__init_tls.c
+index a93141e..9516789 100644
+--- a/src/env/__init_tls.c
++++ b/src/env/__init_tls.c
+@@ -24,6 +24,9 @@ int __init_tp(void *p)
+ 	td->robust_list.head = &td->robust_list.head;
+ 	td->sysinfo = __sysinfo;
+ 	td->next = td->prev = td;
++	td->malloc_tls = __malloc_tls_default;
++	td->malloc_cache = __malloc_tls_default;
++	td->malloc_main = 0;
+ 	return 0;
+ }
+ 
+@@ -86,6 +89,7 @@ static void static_init_tls(size_t *aux)
+ 	Phdr *phdr, *tls_phdr=0;
+ 	size_t base = 0;
+ 	void *mem;
++	pthread_t self;
+ 
+ 	for (p=(void *)aux[AT_PHDR],n=aux[AT_PHNUM]; n; n--,p+=aux[AT_PHENT]) {
+ 		phdr = (void *)p;
+@@ -146,8 +150,11 @@ static void static_init_tls(size_t *aux)
+ 	}
+ 
+ 	/* Failure to initialize thread pointer is always fatal. */
+-	if (__init_tp(__copy_tls(mem)) < 0)
++	self = __copy_tls(mem);
++	if (__init_tp(self) < 0)
+ 		a_crash();
++
++	__malloc_init(self);
+ }
+ 
+ weak_alias(static_init_tls, __init_tls);
+diff --git a/src/exit/exit.c b/src/exit/exit.c
+index 17b33cc..e207822 100644
+--- a/src/exit/exit.c
++++ b/src/exit/exit.c
+@@ -23,6 +23,7 @@ static void libc_exit_fini(void)
+ 	for (; a>(uintptr_t)&__fini_array_start; a-=sizeof(void(*)()))
+ 		(*(void (**)())(a-sizeof(void(*)())))();
+ 	_fini();
++	__malloc_tls_teardown(__pthread_self());
+ }
+ 
+ weak_alias(libc_exit_fini, __libc_exit_fini);
+diff --git a/src/internal/pthread_impl.h b/src/internal/pthread_impl.h
+index de2b9d8..6d775b5 100644
+--- a/src/internal/pthread_impl.h
++++ b/src/internal/pthread_impl.h
+@@ -58,6 +58,9 @@ struct pthread {
+ 	volatile int killlock[1];
+ 	char *dlerror_buf;
+ 	void *stdio_locks;
++	void *malloc_tls;
++	void *malloc_cache;
++	void *malloc_main;
+ 
+ 	/* Part 3 -- the positions of these fields relative to
+ 	 * the end of the structure is external and internal ABI. */
+@@ -187,6 +190,10 @@ hidden void __tl_lock(void);
+ hidden void __tl_unlock(void);
+ hidden void __tl_sync(pthread_t);
+ 
++extern hidden void * const __malloc_tls_default;
++hidden void __malloc_init(pthread_t);
++hidden void __malloc_tls_teardown(pthread_t);
++
+ extern hidden volatile int __thread_list_lock;
+ 
+ extern hidden volatile int __abort_lock[1];
+diff --git a/src/malloc/calloc.c b/src/malloc/calloc.c
+index bf6bddc..6aa482c 100644
+--- a/src/malloc/calloc.c
++++ b/src/malloc/calloc.c
+@@ -32,6 +32,10 @@ weak_alias(allzerop, __malloc_allzerop);
+ 
+ void *calloc(size_t m, size_t n)
+ {
++#ifdef LIBC_CALLOC_EXTERNAL
++	if (!__malloc_replaced)
++		return __libc_calloc(m, n);
++#endif
+ 	if (n && m > (size_t)-1/n) {
+ 		errno = ENOMEM;
+ 		return 0;
+diff --git a/src/malloc/libc_calloc.c b/src/malloc/libc_calloc.c
+index d25eabe..3895c8c 100644
+--- a/src/malloc/libc_calloc.c
++++ b/src/malloc/libc_calloc.c
+@@ -1,4 +1,8 @@
++#ifndef LIBC_CALLOC_EXTERNAL
++
+ #define calloc __libc_calloc
+ #define malloc __libc_malloc
+ 
+ #include "calloc.c"
++
++#endif
+diff --git a/src/malloc/mallocng/malloc.c b/src/malloc/mallocng/malloc.c
+index d695ab8..f70466d 100644
+--- a/src/malloc/mallocng/malloc.c
++++ b/src/malloc/mallocng/malloc.c
+@@ -7,6 +7,8 @@
+ 
+ #include "meta.h"
+ 
++hidden void * const __malloc_tls_default = NULL;
++
+ LOCK_OBJ_DEF;
+ 
+ const uint16_t size_classes[] = {
+diff --git a/src/thread/pthread_create.c b/src/thread/pthread_create.c
+index 087f620..219aa8e 100644
+--- a/src/thread/pthread_create.c
++++ b/src/thread/pthread_create.c
+@@ -68,6 +68,7 @@ _Noreturn void __pthread_exit(void *result)
+ 	}
+ 
+ 	__pthread_tsd_run_dtors();
++	__malloc_tls_teardown(self);
+ 
+ 	__block_app_sigs(&set);
+ 
+@@ -319,6 +320,9 @@ int __pthread_create(pthread_t *restrict res, const pthread_attr_t *restrict att
+ 	new->self = new;
+ 	new->tsd = (void *)tsd;
+ 	new->locale = &libc.global_locale;
++	new->malloc_tls = __malloc_tls_default;
++	new->malloc_cache = __malloc_tls_default;
++	new->malloc_main = 0;
+ 	if (attr._a_detach) {
+ 		new->detach_state = DT_DETACHED;
+ 	} else {
+@@ -395,3 +399,11 @@ fail:
+ 
+ weak_alias(__pthread_exit, pthread_exit);
+ weak_alias(__pthread_create, pthread_create);
++
++static void mdummy(pthread_t p)
++{
++	(void)p;
++}
++
++weak_alias(mdummy, __malloc_init);
++weak_alias(mdummy, __malloc_tls_teardown);

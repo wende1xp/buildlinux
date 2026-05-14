@@ -1,0 +1,419 @@
+diff --git a/src/malloc/mimalloc/static.c b/src/malloc/mimalloc/static.c
+index 2383f65..0c7af58 100644
+--- a/src/malloc/mimalloc/static.c
++++ b/src/malloc/mimalloc/static.c
+@@ -1,43 +1,143 @@
+-/* ----------------------------------------------------------------------------
+-Copyright (c) 2018-2020, Microsoft Research, Daan Leijen
+-This is free software; you can redistribute it and/or modify it under the
+-terms of the MIT license. A copy of the license can be found in the file
+-"LICENSE" at the root of this distribution.
+------------------------------------------------------------------------------*/
+-#ifndef _DEFAULT_SOURCE
+-#define _DEFAULT_SOURCE
++/*
++ * mimalloc v3.3.0 single translation unit wrapper for musl.
++ * Upstream sources live under src/malloc/mimalloc/upstream/.
++ *
++ * musl owns allocator lifecycle and thread teardown, so mimalloc must not use
++ * its normal constructor or pthread-key based auto-init paths here.
++ */
++
++#define MI_LIBC_BUILD 1
++#define MI_BUILD_RELEASE 1
++#define MI_NO_GETENV 1
++
++#ifndef MI_PRIM_HAS_PROCESS_ATTACH
++#define MI_PRIM_HAS_PROCESS_ATTACH 1
++#endif
++
++#include <errno.h>
++
++#include "pthread_impl.h"
++
++#define madvise __madvise
++
++/*
++ * musl builds libc without defining NDEBUG, but this integration is a
++ * production allocator build, not a mimalloc debug build. Force upstream's
++ * release profile so MI_DEBUG/MI_GUARDED/related abort-heavy checks do not
++ * get enabled implicitly inside libc.
++ *
++ * musl's <features.h> also defines `weak` as an attribute macro, which
++ * clashes with mimalloc's use of `__attribute__((weak))`.
++ */
++#ifdef weak
++#undef weak
+ #endif
+-#if defined(__sun)
+-// same remarks as os.c for the static's context.
+-#undef _XOPEN_SOURCE
+-#undef _POSIX_C_SOURCE
++
++#include "upstream/include/mimalloc.h"
++#include "upstream/include/mimalloc/internal.h"
++
++/*
++ * musl should keep ownership of the public malloc-family ABI surface.
++ * Disable mimalloc's own
++ * override exports here so we don't end up with duplicate or looser entry
++ * points like aligned_alloc/memalign.
++ */
++#ifdef MI_MALLOC_OVERRIDE
++#undef MI_MALLOC_OVERRIDE
+ #endif
+ 
+-#include "mimalloc.h"
+-#include "mimalloc/internal.h"
+-
+-// For a static override we create a single object file
+-// containing the whole library. If it is linked first
+-// it will override all the standard library allocation
+-// functions (on Unix's).
+-#include "alloc.c"          // includes alloc-override.c and free.c
+-#include "alloc-aligned.c"
+-#include "alloc-posix.c"
+-#include "arena.c"
+-#include "arena-meta.c"
+-#include "bitmap.c"
+-#include "heap.c"
+-#include "init.c"
+-#include "libc.c"
+-#include "options.c"
+-#include "os.c"
+-#include "page.c"           // includes page-queue.c
+-#include "page-map.c"
+-#include "random.c"
+-#include "stats.c"
+-#include "theap.c"
+-#include "threadlocal.c"
+-#include "prim/prim.c"
++#include "upstream/src/alloc.c"
++#include "upstream/src/alloc-aligned.c"
++#include "upstream/src/alloc-posix.c"
++#include "upstream/src/arena.c"
++#include "upstream/src/arena-meta.c"
++#include "upstream/src/bitmap.c"
++#include "upstream/src/heap.c"
++#include "upstream/src/init.c"
++#include "upstream/src/libc.c"
++#include "upstream/src/options.c"
++#include "upstream/src/os.c"
++#include "upstream/src/page.c"
++#include "upstream/src/page-map.c"
++#include "upstream/src/random.c"
++#include "upstream/src/stats.c"
++#include "upstream/src/theap.c"
++#include "upstream/src/threadlocal.c"
++#include "upstream/src/prim/prim.c"
+ #if MI_OSX_ZONE
+-#include "prim/osx/alloc-override-zone.c"
++#include "upstream/src/prim/osx/alloc-override-zone.c"
+ #endif
++
++extern int __malloc_replaced;
++extern int __aligned_alloc_replaced;
++
++void * const __malloc_tls_default = (void *)&_mi_theap_empty;
++
++void __malloc_init(pthread_t p)
++{
++	(void)p;
++	mi_process_init();
++}
++
++void __malloc_tls_teardown(pthread_t p)
++{
++	if (!p) return;
++	if (p->malloc_tls == (void *)&_mi_theap_empty) return;
++	_mi_thread_done((mi_theap_t *)p->malloc_tls);
++	p->malloc_tls = (void *)&_mi_theap_empty;
++	p->malloc_cache = (void *)&_mi_theap_empty;
++	p->malloc_main = 0;
++}
++
++void __malloc_atfork(int who)
++{
++	(void)who;
++}
++
++void __malloc_donate(char *start, char *end)
++{
++	(void)start;
++	(void)end;
++}
++
++void *__libc_calloc(size_t m, size_t n)
++{
++	return mi_calloc(m, n);
++}
++
++void *__libc_malloc_impl(size_t n)
++{
++	return mi_malloc(n);
++}
++
++void *__libc_realloc(void *p, size_t n)
++{
++	return mi_realloc(p, n);
++}
++
++void __libc_free(void *p)
++{
++	mi_free(p);
++}
++
++void *aligned_alloc(size_t align, size_t len)
++{
++	if ((align & -align) != align) {
++		errno = EINVAL;
++		return 0;
++	}
++
++	if (__malloc_replaced && !__aligned_alloc_replaced) {
++		errno = ENOMEM;
++		return 0;
++	}
++
++	void *p = mi_malloc_aligned(len, align);
++	if (!p && len) errno = ENOMEM;
++	return p;
++}
++
++size_t malloc_usable_size(void *p)
++{
++	return p ? mi_usable_size(p) : 0;
++}
+diff --git a/src/malloc/mimalloc/upstream/include/mimalloc/prim.h b/src/malloc/mimalloc/upstream/include/mimalloc/prim.h
+index 96642bb..e4ce798 100644
+--- a/src/malloc/mimalloc/upstream/include/mimalloc/prim.h
++++ b/src/malloc/mimalloc/upstream/include/mimalloc/prim.h
+@@ -234,7 +234,11 @@ static inline void mi_prim_tls_slot_set(size_t slot, void* value) mi_attr_noexce
+ 
+ 
+ // defined in `init.c`; do not use these directly
++#if defined(MI_LIBC_BUILD)
++#define __mi_theap_main (*(mi_theap_t**)&__pthread_self()->malloc_main)
++#else
+ extern mi_decl_hidden mi_decl_thread mi_theap_t* __mi_theap_main;     // theap belonging to the main heap
++#endif
+ extern mi_decl_hidden bool _mi_process_is_initialized;                // has mi_process_init been called?
+ 
+ 
+@@ -274,7 +278,13 @@ static inline mi_threadid_t _mi_prim_thread_id(void) mi_attr_noexcept {
+ }
+ 
+ // Get a unique id for the current thread.
+-#if defined(MI_PRIM_THREAD_ID)
++#if defined(MI_LIBC_BUILD)
++
++static inline mi_threadid_t __mi_prim_thread_id(void) mi_attr_noexcept {
++  return (mi_threadid_t)__pthread_self();
++}
++
++#elif defined(MI_PRIM_THREAD_ID)
+ 
+ static inline mi_threadid_t __mi_prim_thread_id(void) mi_attr_noexcept {
+   return MI_PRIM_THREAD_ID();  // used for example by CPython for a free threaded build (see python/cpython#115488)
+@@ -361,7 +371,19 @@ This incurs an extra check in the fast path (but can often be combined in an exi
+ static inline mi_theap_t* _mi_theap_default(void);
+ static inline mi_theap_t* _mi_theap_cached(void);
+ 
+-#if defined(_WIN32)
++#if defined(MI_LIBC_BUILD)
++
++static inline mi_theap_t* _mi_theap_default(void) {
++  mi_theap_t* theap = (mi_theap_t*)__pthread_self()->malloc_tls;
++  return (mi_unlikely(theap == NULL) ? (mi_theap_t*)&_mi_theap_empty : theap);
++}
++
++static inline mi_theap_t* _mi_theap_cached(void) {
++  mi_theap_t* theap = (mi_theap_t*)__pthread_self()->malloc_cache;
++  return (mi_unlikely(theap == NULL) ? (mi_theap_t*)&_mi_theap_empty : theap);
++}
++
++#elif defined(_WIN32)
+   #define MI_TLS_MODEL_DYNAMIC_WIN32        1    
+ #elif defined(__APPLE__)  // macOS
+   // #define MI_TLS_MODEL_DYNAMIC_PTHREADS  1    // also works but a bit slower
+@@ -389,7 +411,10 @@ static inline mi_theap_t* __mi_theap_empty(void) {
+   #endif
+ }
+ 
+-#if MI_TLS_MODEL_THREAD_LOCAL
++#if defined(MI_LIBC_BUILD)
++#define MI_THEAP_INITASNULL  0
++
++#elif MI_TLS_MODEL_THREAD_LOCAL
+ // Thread local with an initial value (default on Linux). Very efficient.
+ 
+ extern mi_decl_hidden mi_decl_thread mi_theap_t* __mi_theap_default;  // default theap to allocate from
+diff --git a/src/malloc/mimalloc/upstream/include/mimalloc/types.h b/src/malloc/mimalloc/upstream/include/mimalloc/types.h
+index b0c67ce..cebe0ad 100644
+--- a/src/malloc/mimalloc/upstream/include/mimalloc/types.h
++++ b/src/malloc/mimalloc/upstream/include/mimalloc/types.h
+@@ -486,7 +486,7 @@ typedef struct mi_random_cxt_s {
+   uint32_t input[16];
+   uint32_t output[16];
+   int      output_available;
+-  bool     weak;
++  bool     weak_random;
+ } mi_random_ctx_t;
+ 
+ 
+diff --git a/src/malloc/mimalloc/upstream/include/mimalloc.h b/src/malloc/mimalloc/upstream/include/mimalloc.h
+index b3d5576..fcae9f8 100644
+--- a/src/malloc/mimalloc/upstream/include/mimalloc.h
++++ b/src/malloc/mimalloc/upstream/include/mimalloc.h
+@@ -60,7 +60,9 @@ terms of the MIT license. A copy of the license can be found in the file
+   #define mi_attr_alloc_size2(s1,s2)
+   #define mi_attr_alloc_align(p)
+ #elif defined(__GNUC__)                 // includes clang and icc
+-  #if defined(MI_SHARED_LIB) && defined(MI_SHARED_LIB_EXPORT)
++  #if defined(MI_LIBC_BUILD)
++    #define mi_decl_export              static
++  #elif defined(MI_SHARED_LIB) && defined(MI_SHARED_LIB_EXPORT)
+     #define mi_decl_export              __attribute__((visibility("default")))
+   #else
+     #define mi_decl_export
+diff --git a/src/malloc/mimalloc/upstream/src/alloc.c b/src/malloc/mimalloc/upstream/src/alloc.c
+index bce7bb9..9d0dd97 100644
+--- a/src/malloc/mimalloc/upstream/src/alloc.c
++++ b/src/malloc/mimalloc/upstream/src/alloc.c
+@@ -610,7 +610,7 @@ static bool mi_try_new_handler(bool nothrow) {
+ #else
+ typedef void (*std_new_handler_t)(void);
+ 
+-#if (defined(__GNUC__) || (defined(__clang__) && !defined(_MSC_VER)))  // exclude clang-cl, see issue #631
++#if !defined(MI_LIBC_BUILD) && (defined(__GNUC__) || (defined(__clang__) && !defined(_MSC_VER)))  // exclude clang-cl, see issue #631
+ std_new_handler_t __attribute__((weak)) _ZSt15get_new_handlerv(void) {
+   return NULL;
+ }
+diff --git a/src/malloc/mimalloc/upstream/src/init.c b/src/malloc/mimalloc/upstream/src/init.c
+index 093f642..d025767 100644
+--- a/src/malloc/mimalloc/upstream/src/init.c
++++ b/src/malloc/mimalloc/upstream/src/init.c
+@@ -217,7 +217,9 @@ mi_decl_cache_align mi_heap_t heap_main
+ #endif
+ 
+ // the theap belonging to the main heap
++#ifndef MI_LIBC_BUILD
+ mi_decl_hidden mi_decl_thread mi_theap_t* __mi_theap_main = NULL;
++#endif
+ 
+ mi_threadid_t _mi_thread_id(void) mi_attr_noexcept {
+   return _mi_prim_thread_id();
+@@ -899,6 +901,8 @@ void _mi_theap_cached_set(mi_theap_t* theap) {
+   mi_tls_slots_init();
+   #if MI_TLS_MODEL_THREAD_LOCAL
+     __mi_theap_cached = theap;
++  #elif defined(MI_LIBC_BUILD)
++    __pthread_self()->malloc_cache = theap;
+   #elif MI_TLS_MODEL_FIXED_SLOT
+     mi_prim_tls_slot_set(MI_TLS_MODEL_FIXED_SLOT_CACHED, theap);
+   #elif MI_TLS_MODEL_DYNAMIC_WIN32
+@@ -918,6 +922,8 @@ void _mi_theap_default_set(mi_theap_t* theap)  {
+   mi_tls_slots_init();
+   #if MI_TLS_MODEL_THREAD_LOCAL
+     __mi_theap_default = theap;
++  #elif defined(MI_LIBC_BUILD)
++    __pthread_self()->malloc_tls = theap;
+   #elif MI_TLS_MODEL_FIXED_SLOT
+     mi_prim_tls_slot_set(MI_TLS_MODEL_FIXED_SLOT_DEFAULT, theap);
+   #elif MI_TLS_MODEL_DYNAMIC_WIN32
+diff --git a/src/malloc/mimalloc/upstream/src/options.c b/src/malloc/mimalloc/upstream/src/options.c
+index 4027ce2..cac9a3e 100644
+--- a/src/malloc/mimalloc/upstream/src/options.c
++++ b/src/malloc/mimalloc/upstream/src/options.c
+@@ -441,6 +441,7 @@ static _Atomic(size_t) warning_count; // = 0;  // when >= max_warning_count stop
+ // variables on demand. This is why we use a _mi_preloading test on such
+ // platforms. However, C code generator may move the initial thread local address
+ // load before the `if` and we therefore split it out in a separate function.
++#ifndef MI_LIBC_BUILD
+ static mi_decl_thread bool recurse = false;
+ 
+ static mi_decl_noinline bool mi_recurse_enter_prim(void) {
+@@ -452,6 +453,10 @@ static mi_decl_noinline bool mi_recurse_enter_prim(void) {
+ static mi_decl_noinline void mi_recurse_exit_prim(void) {
+   recurse = false;
+ }
++#else
++static bool mi_recurse_enter_prim(void) { return true; }
++static void mi_recurse_exit_prim(void) {}
++#endif
+ 
+ static bool mi_recurse_enter(void) {
+   #if defined(__APPLE__) || defined(__ANDROID__) || defined(MI_TLS_RECURSE_GUARD)
+diff --git a/src/malloc/mimalloc/upstream/src/prim/unix/prim.c b/src/malloc/mimalloc/upstream/src/prim/unix/prim.c
+index a40afa5..6104430 100644
+--- a/src/malloc/mimalloc/upstream/src/prim/unix/prim.c
++++ b/src/malloc/mimalloc/upstream/src/prim/unix/prim.c
+@@ -288,7 +288,7 @@ static void* unix_mmap_prim_aligned(void* addr, size_t size, size_t try_alignmen
+     // fall back to regular mmap
+   }
+   #endif
+-  #if (MI_INTPTR_SIZE >= 8) && !defined(MAP_ALIGNED)
++  #if (MI_INTPTR_SIZE >= 8) && !defined(MAP_ALIGNED) && !defined(MI_LIBC_BUILD)
+   // on 64-bit systems, use the virtual address area after 2TiB for 4MiB aligned allocations
+   if (addr == NULL) {
+     void* hint = _mi_os_get_aligned_hint(try_alignment, size);
+@@ -937,7 +937,7 @@ bool _mi_prim_random_buf(void* buf, size_t buf_len) {
+ // Thread init/done
+ //----------------------------------------------------------------
+ 
+-#if defined(MI_USE_PTHREADS)
++#if defined(MI_USE_PTHREADS) && !defined(MI_LIBC_BUILD)
+ 
+ // use pthread local storage keys to detect thread ending
+ // (and used with MI_TLS_PTHREADS for the default theap)
+diff --git a/src/malloc/mimalloc/upstream/src/random.c b/src/malloc/mimalloc/upstream/src/random.c
+index 990e489..4e08666 100644
+--- a/src/malloc/mimalloc/upstream/src/random.c
++++ b/src/malloc/mimalloc/upstream/src/random.c
+@@ -182,10 +182,10 @@ static void mi_random_init_ex(mi_random_ctx_t* ctx, bool use_weak) {
+       x = _mi_random_shuffle(x);
+       ((uint32_t*)key)[i] = (uint32_t)x;
+     }
+-    ctx->weak = true;
++    ctx->weak_random = true;
+   }
+   else {
+-    ctx->weak = false;
++    ctx->weak_random = false;
+   }
+   chacha_init(ctx, key, (uintptr_t)ctx /*nonce*/ );
+ }
+@@ -199,7 +199,7 @@ void _mi_random_init_weak(mi_random_ctx_t * ctx) {
+ }
+ 
+ void _mi_random_reinit_if_weak(mi_random_ctx_t * ctx) {
+-  if (ctx->weak) {
++  if (ctx->weak_random) {
+     _mi_random_init(ctx);
+   }
+ }
+diff --git a/src/malloc/mimalloc/upstream/src/threadlocal.c b/src/malloc/mimalloc/upstream/src/threadlocal.c
+index c7822c1..06e0939 100644
+--- a/src/malloc/mimalloc/upstream/src/threadlocal.c
++++ b/src/malloc/mimalloc/upstream/src/threadlocal.c
+@@ -131,11 +131,15 @@ void* _mi_thread_local_get( mi_thread_local_t key ) {
+ }
+ 
+ void _mi_thread_locals_thread_done(void) {
++#if defined(MI_LIBC_BUILD)
++  return;
++#else
+   mi_thread_locals_t* const tls = mi_thread_locals;
+   if (tls!=NULL && tls->count > 0) {
+     mi_free(tls);
+     mi_thread_locals = &mi_thread_locals_empty;
+   }
++#endif
+ }
+ 
+ /* -----------------------------------------------------------
+@@ -221,4 +225,3 @@ void _mi_thread_local_free(mi_thread_local_t key) {
+     }
+   }
+ }
+-

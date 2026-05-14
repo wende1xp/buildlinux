@@ -1,0 +1,32 @@
+diff -Naur a/Modules/_ssl.c b/Modules/_ssl.c
+--- a/Modules/_ssl.c	2026-04-07 08:13:20.000000000 -0500
++++ b/Modules/_ssl.c	2026-04-19 17:40:55.497794723 -0500
+@@ -909,6 +909,7 @@
+ #undef SID_CTX
+     }
+ 
++#ifndef LIBRESSL_VERSION_NUMBER
+     /* bpo43522 and OpenSSL < 1.1.1l: copy hostflags manually */
+ #if OPENSSL_VERSION_NUMBER < 0x101010cf
+     X509_VERIFY_PARAM *ssl_verification_params = SSL_get0_param(self->ssl);
+@@ -917,6 +918,7 @@
+     unsigned int ssl_ctx_host_flags = X509_VERIFY_PARAM_get_hostflags(ssl_ctx_verification_params);
+     X509_VERIFY_PARAM_set_hostflags(ssl_verification_params, ssl_ctx_host_flags);
+ #endif
++#endif
+     SSL_set_app_data(self->ssl, self);
+     if (sock) {
+         SSL_set_fd(self->ssl, Py_SAFE_DOWNCAST(sock->sock_fd, SOCKET_T, int));
+@@ -3875,7 +3877,11 @@
+     unsigned int host_flags;
+ 
+     ssl_verification_params = SSL_CTX_get0_param(self->ctx);
+-    host_flags = X509_VERIFY_PARAM_get_hostflags(ssl_verification_params);
++#ifdef LIBRESSL_VERSION_NUMBER
++    host_flags = 0;
++#else
++        host_flags = X509_VERIFY_PARAM_get_hostflags(ssl_verification_params);
++#endif
+     return PyLong_FromUnsignedLong(host_flags);
+ }
+ 

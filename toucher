@@ -1,4 +1,0 @@
-for sh in extract_pkg fetch_pkg cleanup_build_dir verify_deps chroot runner custom_meson custom_cmake custom_configure; do
-	touch $sh
-	chmod +x $sh
-done

@@ -1,0 +1,98 @@
+--- a/Makefile
++++ b/Makefile
+@@ -186,7 +186,7 @@
+ 	cp $< $@
+ 
+ lib/musl-gcc.specs: $(srcdir)/tools/musl-gcc.specs.sh config.mak
+-	sh $< "$(includedir)" "$(libdir)" "$(LDSO_PATHNAME)" > $@
++	sh $< "$(includedir)" "$(libdir)" "$(LDSO_PATHNAME)" "$(WRAPCC_GCC)" "$(LIBCC)" > $@
+ 
+ obj/musl-gcc: config.mak
+ 	printf '#!/bin/sh\nexec "$${REALGCC:-$(WRAPCC_GCC)}" "$$@" -specs "%s/musl-gcc.specs"\n' "$(libdir)" > $@
+--- a/tools/musl-gcc.specs.sh
++++ b/tools/musl-gcc.specs.sh
+@@ -1,7 +1,60 @@
+ incdir=$1
+ libdir=$2
+ ldso=$3
+-cat <<EOF
++cc=${4:-gcc}
++libcc=${5:--lgcc -lgcc_eh}
++
++resolve_cc_file() {
++	file=$1
++	path=$($cc -print-file-name="$file" 2>/dev/null) || return 1
++	test -n "$path" || return 1
++	test "$path" != "$file" || return 1
++	printf %s "$path"
++}
++
++resolve_cc_runtime_lib() {
++	lib=$1
++	path=$(resolve_cc_file "lib$lib.a") || path=
++	if test -z "$path" ; then
++		case "$lib" in
++		gcc|compiler_rt)
++			path=$($cc -print-libgcc-file-name 2>/dev/null) || path=
++			test -n "$path" || path=
++			test "$path" != libgcc.a || path=
++			;;
++		esac
++	fi
++	test -n "$path" || return 1
++	printf %s "$path"
++}
++
++runtime_libs=
++for lib in $libcc ; do
++	case "$lib" in
++	-l*)
++		path=$(resolve_cc_runtime_lib "${lib#-l}") || path=
++		test -n "$path" || path=$lib
++		;;
++	/*|./*|../*)
++		path=$lib
++		;;
++	*)
++		path=$lib
++		;;
++	esac
++	runtime_libs="${runtime_libs}${runtime_libs:+ }$path"
++done
++
++test -n "$runtime_libs" || {
++	path=$($cc -print-libgcc-file-name 2>/dev/null) || path=
++	test -n "$path" || path=libgcc.a%s
++	test "$path" != libgcc.a || path=libgcc.a%s
++	runtime_libs=$path
++}
++
++crtbegin=$(resolve_cc_file crtbeginS.o) || crtbegin=crtbeginS.o%s
++crtend=$(resolve_cc_file crtendS.o) || crtend=crtendS.o%s
++cat <<EOF
+ %rename cpp_options old_cpp_options
+ 
+ *cpp_options:
+@@ -14,13 +67,13 @@
+ -L$libdir -L .%s
+ 
+ *libgcc:
+-libgcc.a%s %:if-exists(libgcc_eh.a%s)
++$runtime_libs
+ 
+ *startfile:
+-%{!shared: $libdir/Scrt1.o} $libdir/crti.o crtbeginS.o%s
++%{!shared: $libdir/Scrt1.o} $libdir/crti.o $crtbegin
+ 
+ *endfile:
+-crtendS.o%s $libdir/crtn.o
++$crtend $libdir/crtn.o
+ 
+ *link:
+ -dynamic-linker $ldso -nostdlib %{shared:-shared} %{static:-static} %{rdynamic:-export-dynamic}
+@@ -34,4 +87,4 @@
+ *esp_cpp_options:
+ 
+ 
+-EOF
++EOF

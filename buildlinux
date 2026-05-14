@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+
+trap 'printf "\nEncerrando...\n"; exit 1' SIGINT
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+declare -A URL=(
+    [llvm]="https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.4/llvm-project-22.1.4.src.tar.xz"
+    [linux]="https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-7.0.4.tar.xz"
+    [musl]="https://musl.libc.org/releases/musl-1.2.6.tar.gz"
+    [mimalloc]="https://github.com/microsoft/mimalloc/archive/refs/tags/v3.3.0.tar.gz"
+)
+
+declare -A TARBALL=(
+    [llvm]="llvm-project-22.1.4.src.tar.xz"
+    [linux]="linux-7.0.4.tar.xz"
+    [musl]="musl-1.2.6.tar.gz"
+    [mimalloc]="mimalloc-3.3.0.tar.gz"
+)
+
+declare -A PKGDIR=(
+    [llvm]="llvm-project-22.1.4.src"
+    [linux]="linux-7.0.4"
+    [musl]="musl-1.2.6"
+    [mimalloc]="mimalloc-3.3.0"
+)
+
+main() {
+    :
+}
+
+source $SCRIPT_DIR/config.sh
+source $SCRIPT_DIR/helpers/verify_deps.sh
+
+#if [ -z "$ROOTFS" ]; then
+#	msg_error "Variável ROOTFS não definida."
+#	exit 1
+#fi
+
+verify_deps
+
+echo "passou"
+
+trap 'printf "\nEncerrando...\n"; exit 1' SIGTSTP
