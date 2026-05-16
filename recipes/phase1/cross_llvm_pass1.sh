@@ -1,4 +1,12 @@
 cross_llvm_pass1() {
+    # Carrega helper de estado para permitir retomar esta fase sem recompilar.
+    REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")"/../.. && pwd)"
+    # shellcheck disable=SC1090
+    source "$REPO_ROOT/helpers/state.sh"
+    if state_is_done "cross_llvm_pass1"; then
+        msg_warn "Ignorando LLVM (Primeira Passagem): já concluído anteriormente."
+        return 0
+    fi
     msg_now_building "LLVM (Primeira Passagem)"
     
     fetch_pkg llvm
@@ -45,4 +53,5 @@ cross_llvm_pass1() {
     ln -sf llvm-readelf "$TOOLCHAIN/bin/$SYSTARGET-readelf"
     ln -sf llvm-strip   "$TOOLCHAIN/bin/$SYSTARGET-strip"
     ln -sf ld.lld       "$TOOLCHAIN/bin/$SYSTARGET-ld"
+    state_mark_done "cross_llvm_pass1"
 }
