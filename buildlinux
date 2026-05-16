@@ -3,24 +3,26 @@
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
-source "$SCRIPT_DIR/helpers/messages.sh"
+. "$SCRIPT_DIR/helpers/messages.sh"
+. "$SCRIPT_DIR/config.sh"
+. "$SCRIPT_DIR/helpers/check_requirements.sh"
+. "$SCRIPT_DIR/helpers/utils.sh"
+. "$SCRIPT_DIR/helpers/systree.sh"
 
-if [ -z "$ROOTFS" ]; then
-	msg_error "Variável ROOTFS não definida."
-	exit 1
-fi
+info
 
-source "$SCRIPT_DIR/config.sh"
-source "$SCRIPT_DIR/helpers/requirements.sh"
 
-verify_dependencies
+#umount_nbd_image
 
-if [ "$I_KNOW_WHAT_I_DOING" = no ]; then
-    verify_hardware
-fi
+preparation_workspace
+prepare_environment
 
-main() {
-    :
-}
+preparation_sysfile
+
+file_interloper "Criando uma árvore de diretórios mínima" make_minimal_systree
+
+build_interloper "Cabeçalhos do Kernel Linux" "$SCRIPT_DIR/recipes/phase1/cross_linux_headers.sh"
+
+build_interloper "Cabeçalhos do Musl" "$SCRIPT_DIR/recipes/phase1/cross_musl_headers.sh"
 
 echo "passou"

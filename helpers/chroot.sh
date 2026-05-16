@@ -1,3 +1,0 @@
-enter_chroot(){
-
-}

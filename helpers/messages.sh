@@ -1,12 +1,31 @@
-msg_now_building() {
-    echo ""
-    echo "Compilando $1..."
-    echo ""
+msg() {
+    echo
+    echo "[MSG]: $1"
 }
 
-msg_error() {
-    echo ""
-    echo "ERRO: $1"
+error() {
+    echo
+    echo "[ERRO]: $1" >&2
+}
+
+warn() {
+    echo
+    echo "[AVISO]: $1" >&2
+}
+
+ok() {
+    echo
+    echo "[OK]: $1"
+}
+
+now_building() {
+    echo
+    echo "[BUILD]: $1"
+}
+
+die() {
+    error "$1"
+    exit 1
 }
 
 info() {

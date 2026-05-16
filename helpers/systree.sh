@@ -1,3 +1,22 @@
+preparation_workspace() {
+    mkdir -pv \
+        "$WORKSPACE" \
+        "$LOGDIR" \
+        "$BACKUP_DIR" \
+        "$IMGDIR"
+}
+
+preparation_sysfile(){
+	sudo ROOTFS="$ROOTFS" chmod 755 "$ROOTFS"
+	sudo ROOTFS="$ROOTFS" chown $USER:$USER "$ROOTFS"
+
+	rm -rf "${ROOTFS:?}"/* 
+	mkdir -pv "${ROOTFS:?}"/tmp
+
+	touch "$STATE_BUILD"
+	touch "$STATE_FILE"
+}
+
 make_minimal_systree() {
 	mkdir -pv "$ROOTFS"/{etc,var} "$ROOTFS"/usr/{bin,lib,lib64,sbin} "$TOOLCHAIN" "$SOURCES"
 
