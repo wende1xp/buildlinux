@@ -1,0 +1,480 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+VERSION="1.0.0"
+
+if [[ -n "${SUDO_USER:-}" ]]; then
+    REAL_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+else
+    REAL_HOME="$HOME"
+fi
+
+IMGDIR="$IMGDIR"
+IMGFMT="$IMGFMT"
+IMGNAME="$IMGNAME"
+IMGSIZE="$IMGSIZE"
+BOOTSIZE="$BOOTSIZE"
+ROOTLABEL="$ROOTLABEL"
+BOOTLABEL="$BOOTLABEL"
+P2MOUNT="$ROOTFS"
+P1MOUNT="$ROOTFS/boot/efi"
+
+# Arquivo de config opcional
+CONFIG_FILE="${REAL_HOME}/.config/imgctl.conf"
+
+# ------------------------------------------------------------------------------
+# Cores
+# ------------------------------------------------------------------------------
+if [[ -t 1 ]]; then
+    RED=$'\e[0;31m'; YELLOW=$'\e[1;33m'; GREEN=$'\e[0;32m'
+    CYAN=$'\e[0;36m'; BOLD=$'\e[1m'; RESET=$'\e[0m'
+else
+    RED=''; YELLOW=''; GREEN=''; CYAN=''; BOLD=''; RESET=''
+fi
+
+# ------------------------------------------------------------------------------
+# Logging
+# ------------------------------------------------------------------------------
+info()    { echo -e "${CYAN}::${RESET} $*"; }
+ok()      { echo -e "${GREEN}ok${RESET}  $*"; }
+warn()    { echo -e "${YELLOW}warn${RESET} $*" >&2; }
+die()     { echo -e "${RED}erro${RESET} $*" >&2; exit 1; }
+section() { echo -e "\n${BOLD}==> $*${RESET}"; }
+
+# ------------------------------------------------------------------------------
+# Carrega config se existir
+# ------------------------------------------------------------------------------
+load_config() {
+    [[ -f "$CONFIG_FILE" ]] || return 0
+    # Permite apenas atribuições simples VAR=valor
+    local line
+    while IFS= read -r line; do
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+        if [[ "$line" =~ ^([A-Z_]+)=(.*)$ ]]; then
+            local key="${BASH_REMATCH[1]}"
+            local val="${BASH_REMATCH[2]}"
+            # Remove aspas opcionais
+            val="${val%\"}"
+            val="${val#\"}"
+            val="${val%\'}"
+            val="${val#\'}"
+            case "$key" in
+                IMGDIR|IMGFMT|IMGNAME|IMGSIZE|BOOTSIZE|ROOTLABEL|BOOTLABEL|P2MOUNT|P1MOUNT)
+                    printf -v "$key" '%s' "$val" ;;
+            esac
+        fi
+    done < "$CONFIG_FILE"
+}
+
+# ------------------------------------------------------------------------------
+# Verificações de ambiente
+# ------------------------------------------------------------------------------
+check_root() {
+    [[ $EUID -eq 0 ]] || die "Este comando precisa ser executado como root."
+}
+
+check_deps() {
+    local deps=("qemu-nbd" "qemu-img" "fdisk" "partprobe" "mkfs.vfat" "mkfs.ext4"
+                "e2label" "fatlabel" "lsblk" "findmnt")
+    local missing=()
+    for dep in "${deps[@]}"; do
+        command -v "$dep" &>/dev/null || missing+=("$dep")
+    done
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        die "Dependências ausentes: ${missing[*]}"
+    fi
+}
+
+# ------------------------------------------------------------------------------
+# NBD
+# ------------------------------------------------------------------------------
+find_free_nbd() {
+    modprobe nbd max_part=8 2>/dev/null || true
+    local dev
+    for dev in /dev/nbd{0..15}; do
+        [[ -b "$dev" ]] || continue
+        # Dispositivo livre se size == 0
+        if [[ "$(blockdev --getsize64 "$dev" 2>/dev/null || echo 1)" -eq 0 ]]; then
+            echo "$dev"
+            return 0
+        fi
+    done
+    die "Nenhum dispositivo NBD livre encontrado (nbd0..nbd15)."
+}
+
+get_active_nbd() {
+    local dev
+    for dev in /dev/nbd{0..15}; do
+        [[ -b "$dev" ]] || continue
+        if [[ "$(blockdev --getsize64 "$dev" 2>/dev/null || echo 0)" -gt 0 ]]; then
+            # Confirma que está conectado à nossa imagem
+            if findmnt --source "${dev}p2" &>/dev/null || \
+               findmnt --source "${dev}p1" &>/dev/null; then
+                echo "$dev"
+                return 0
+            fi
+            # Pode estar conectado mas não montado
+            if [[ "$(blockdev --getsize64 "$dev")" -gt 0 ]]; then
+                echo "$dev"
+                return 0
+            fi
+        fi
+    done
+    return 1
+}
+
+# ------------------------------------------------------------------------------
+# Cleanup / trap
+# ------------------------------------------------------------------------------
+NBD_CONNECTED=""
+MOUNTS_DONE=()
+
+cleanup() {
+    local exit_code=$?
+    [[ $exit_code -eq 0 ]] && return
+
+    warn "Erro detectado — executando limpeza..."
+
+    for mnt in "${MOUNTS_DONE[@]:-}"; do
+        umount "$mnt" 2>/dev/null && info "Desmontado: $mnt" || true
+    done
+
+    if [[ -n "$NBD_CONNECTED" ]]; then
+        qemu-nbd --disconnect "$NBD_CONNECTED" 2>/dev/null && \
+            info "NBD desconectado: $NBD_CONNECTED" || true
+        sleep 1
+        rmmod nbd 2>/dev/null || true
+    fi
+}
+
+trap cleanup EXIT
+
+# ------------------------------------------------------------------------------
+# Subcomando: build
+# ------------------------------------------------------------------------------
+cmd_build() {
+    local imgname="$IMGNAME" imgsize="$IMGSIZE" imgdir="$IMGDIR"
+    local bootsize="$BOOTSIZE"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -n|--name)    imgname="$2";  shift 2 ;;
+            -s|--size)    imgsize="$2";  shift 2 ;;
+            -d|--dir)     imgdir="$2";   shift 2 ;;
+            -b|--boot)    bootsize="$2"; shift 2 ;;
+            -h|--help)    usage_build; return 0 ;;
+            *) die "Opção desconhecida: $1" ;;
+        esac
+    done
+
+    local imgfile="${imgdir}/${imgname}.${IMGFMT}"
+
+    section "Verificações"
+    check_root
+    check_deps
+    [[ -d "$imgdir" ]] || die "Diretório não encontrado: $imgdir"
+    if [[ -f "$imgfile" ]]; then
+        warn "Imagem já existe: $imgfile"
+        read -rp "Sobrescrever? [s/N] " ans
+        [[ "$ans" =~ ^[sS]$ ]] || die "Abortado."
+        rm -f "$imgfile"
+    fi
+    ok "Ambiente pronto"
+
+    section "Criando imagem"
+    info "Arquivo : $imgfile"
+    info "Formato : $IMGFMT"
+    info "Tamanho : $imgsize  (boot: $bootsize)"
+    qemu-img create -f "$IMGFMT" "$imgfile" "$imgsize"
+    ok "Imagem criada"
+
+    section "Conectando via NBD"
+    local nbd
+    nbd=$(find_free_nbd)
+    NBD_CONNECTED="$nbd"
+    info "Usando $nbd"
+    qemu-nbd --connect="$nbd" "$imgfile"
+    sleep 2
+    ok "Conectado"
+
+    section "Particionando"
+    # GPT: p1 = EFI System (tipo 1), p2 = Linux filesystem
+    fdisk "$nbd" <<EOF
+g
+n
+1
+
++${bootsize}
+t
+1
+n
+2
+
+
+w
+EOF
+    partprobe "$nbd"
+    sleep 1
+    ok "Tabela de partições gravada"
+
+    section "Formatando"
+    info "p1 → vfat (EFI)"
+    mkfs.vfat -F 32 "${nbd}p1"
+    info "p2 → ext4 (root)"
+    mkfs.ext4 -F "${nbd}p2"
+    sync
+    ok "Formatação concluída"
+
+    section "Aplicando labels"
+    e2label  "${nbd}p2" "$ROOTLABEL"
+    fatlabel "${nbd}p1" "$BOOTLABEL"
+    ok "Labels definidas"
+
+    section "Montando"
+    umask 022
+    mkdir -p "$P2MOUNT"
+    mount -t ext4 "${nbd}p2" "$P2MOUNT"
+    MOUNTS_DONE+=("$P2MOUNT")
+    chown root:root "$P2MOUNT"
+    chmod 755 "$P2MOUNT"
+
+    mkdir -p "$P1MOUNT"
+    mount -t vfat "${nbd}p1" "$P1MOUNT"
+    MOUNTS_DONE+=("$P1MOUNT")
+    ok "Imagem montada"
+
+    # Tudo ok — limpa o trap
+    NBD_CONNECTED=""
+    MOUNTS_DONE=()
+
+    section "Concluído"
+    echo -e "${GREEN}Imagem pronta e montada:${RESET}"
+    echo -e "  root → ${BOLD}$P2MOUNT${RESET}  (${nbd}p2)"
+    echo -e "  efi  → ${BOLD}$P1MOUNT${RESET}  (${nbd}p1)"
+}
+
+# ------------------------------------------------------------------------------
+# Subcomando: mount
+# ------------------------------------------------------------------------------
+cmd_mount() {
+    local imgname="$IMGNAME" imgdir="$IMGDIR"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -n|--name) imgname="$2"; shift 2 ;;
+            -d|--dir)  imgdir="$2";  shift 2 ;;
+            -h|--help) usage_mount; return 0 ;;
+            *) die "Opção desconhecida: $1" ;;
+        esac
+    done
+
+    local imgfile="${imgdir}/${imgname}.${IMGFMT}"
+
+    section "Verificações"
+    check_root
+    check_deps
+    [[ -f "$imgfile" ]] || die "Imagem não encontrada: $imgfile"
+
+    if findmnt "$P2MOUNT" &>/dev/null; then
+        warn "Imagem já está montada em $P2MOUNT"
+        return 0
+    fi
+    ok "Ambiente pronto"
+
+    section "Conectando via NBD"
+    local nbd
+    nbd=$(find_free_nbd)
+    NBD_CONNECTED="$nbd"
+    info "Usando $nbd"
+    qemu-nbd --connect="$nbd" "$imgfile"
+    partprobe "$nbd"
+    sleep 1
+    ok "Conectado"
+
+    section "Montando"
+    mkdir -p "$P2MOUNT"
+    mount -t ext4 "${nbd}p2" "$P2MOUNT"
+    MOUNTS_DONE+=("$P2MOUNT")
+
+    mkdir -p "$P1MOUNT"
+    mount -t vfat "${nbd}p1" "$P1MOUNT"
+    MOUNTS_DONE+=("$P1MOUNT")
+    ok "Imagem montada"
+
+    NBD_CONNECTED=""
+    MOUNTS_DONE=()
+
+    section "Concluído"
+    echo -e "${GREEN}Montado:${RESET}"
+    echo -e "  root → ${BOLD}$P2MOUNT${RESET}  (${nbd}p2)"
+    echo -e "  efi  → ${BOLD}$P1MOUNT${RESET}  (${nbd}p1)"
+}
+
+# ------------------------------------------------------------------------------
+# Subcomando: umount
+# ------------------------------------------------------------------------------
+cmd_umount() {
+    section "Verificações"
+    check_root
+
+    local nbd=""
+    if ! findmnt "$P2MOUNT" &>/dev/null; then
+        warn "Nada montado em $P2MOUNT — nada a fazer."
+        return 0
+    fi
+
+    # Descobre qual NBD está em uso
+    local src
+    src=$(findmnt -no SOURCE "$P2MOUNT" 2>/dev/null || true)
+    if [[ -n "$src" ]]; then
+        nbd="${src%p*}"  # /dev/nbd0p2 → /dev/nbd0
+    fi
+    ok "NBD identificado: ${nbd:-desconhecido}"
+
+    section "Desmontando"
+    if findmnt "$P1MOUNT" &>/dev/null; then
+        umount "$P1MOUNT"
+        ok "Desmontado: $P1MOUNT"
+    fi
+    umount "$P2MOUNT"
+    ok "Desmontado: $P2MOUNT"
+
+    section "Desconectando NBD"
+    if [[ -n "$nbd" ]]; then
+        qemu-nbd --disconnect "$nbd"
+        sleep 1
+        ok "Desconectado: $nbd"
+    fi
+
+    rmmod nbd 2>/dev/null && ok "Módulo nbd removido" || \
+        warn "Não foi possível remover módulo nbd (pode estar em uso por outro processo)"
+
+    section "Concluído"
+    ok "Imagem desmontada com sucesso"
+}
+
+# ------------------------------------------------------------------------------
+# Subcomando: status
+# ------------------------------------------------------------------------------
+cmd_status() {
+    section "Status da imagem"
+
+    local imgfile="${IMGDIR}/${IMGNAME}.${IMGFMT}"
+
+    echo -e "${BOLD}Arquivo:${RESET}"
+    if [[ -f "$imgfile" ]]; then
+        local disk_size virtual_size
+        disk_size=$(du -sh "$imgfile" 2>/dev/null | cut -f1)
+        virtual_size=$(qemu-img info "$imgfile" 2>/dev/null \
+                       | awk '/virtual size/{print $3, $4}' || echo "?")
+        echo -e "  ${GREEN}✓${RESET} $imgfile"
+        echo    "    tamanho real:    $disk_size"
+        echo    "    tamanho virtual: $virtual_size"
+    else
+        echo -e "  ${RED}✗${RESET} $imgfile não encontrado"
+    fi
+
+    echo ""
+    echo -e "${BOLD}Montagem:${RESET}"
+    if findmnt "$P2MOUNT" &>/dev/null; then
+        local src nbd
+        src=$(findmnt -no SOURCE "$P2MOUNT")
+        nbd="${src%p*}"
+        local used avail
+        read -r used avail _ < <(df -h "$P2MOUNT" | awk 'NR==2{print $3, $4, $5}')
+        echo -e "  ${GREEN}✓${RESET} Montada via $nbd"
+        echo    "    root → $P2MOUNT  ($src)"
+        echo    "    efi  → $P1MOUNT"
+        echo    "    uso:  $used usado  |  $avail livre"
+    else
+        echo -e "  ${YELLOW}–${RESET} Não montada"
+    fi
+
+    echo ""
+    echo -e "${BOLD}Dispositivos NBD ativos:${RESET}"
+    local found=0
+    local dev
+    for dev in /dev/nbd{0..15}; do
+        [[ -b "$dev" ]] || continue
+        local sz
+        sz=$(blockdev --getsize64 "$dev" 2>/dev/null || echo 0)
+        if [[ "$sz" -gt 0 ]]; then
+            echo "  $dev  (${sz} bytes)"
+            found=1
+        fi
+    done
+    [[ $found -eq 0 ]] && echo "  nenhum"
+}
+
+# ------------------------------------------------------------------------------
+# Uso / help
+# ------------------------------------------------------------------------------
+usage() {
+    cat <<EOF
+
+${BOLD}imgctl${RESET} — Gerenciador de imagens qcow2
+
+${BOLD}Uso:${RESET}
+  imgctl <subcomando> [opções]
+
+${BOLD}Subcomandos:${RESET}
+  build    Cria, particiona, formata e monta uma nova imagem
+  mount    Monta uma imagem existente
+  umount   Desmonta a imagem e desconecta o NBD
+  status   Mostra estado atual da imagem e montagem
+
+${BOLD}Opções globais:${RESET}
+  -h, --help     Exibe esta ajuda
+  -v, --version  Exibe a versão
+
+${BOLD}Opções de build / mount:${RESET}
+  -n, --name  <nome>      Nome da imagem (sem extensão)   [default: $IMGNAME]
+  -s, --size  <tamanho>   Tamanho total da imagem         [default: $IMGSIZE]  (build)
+  -b, --boot  <tamanho>   Tamanho da partição EFI         [default: $BOOTSIZE] (build)
+  -d, --dir   <diretório> Diretório onde a imagem reside  [default: $IMGDIR]
+
+${BOLD}Arquivo de configuração:${RESET}
+  $CONFIG_FILE
+  (sobrescreve os defaults acima; argumentos CLI têm prioridade)
+
+${BOLD}Exemplos:${RESET}
+  imgctl build
+  imgctl build -n meu-sistema -s 20G -b 512M
+  imgctl mount -d /tmp/imagens
+  imgctl umount
+  imgctl status
+
+EOF
+}
+
+usage_build() {
+    echo "Uso: imgctl build [-n nome] [-s tamanho] [-d dir] [-b boot_size]"
+}
+
+usage_mount() {
+    echo "Uso: imgctl mount [-n nome] [-d dir]"
+}
+
+# ------------------------------------------------------------------------------
+# Entry point
+# ------------------------------------------------------------------------------
+load_config
+
+# Detecta flags passadas sem subcomando e sugere o correto
+_first="${1:-}"
+if [[ "$_first" == -* && "$_first" != "-h" && "$_first" != "--help" \
+                       && "$_first" != "-v" && "$_first" != "--version" ]]; then
+    die "Subcomando ausente. Exemplo: imgctl build $*"
+fi
+
+case "$_first" in
+    build)   shift; cmd_build  "$@" ;;
+    mount)   shift; cmd_mount  "$@" ;;
+    umount)  shift; cmd_umount "$@" ;;
+    status)  shift; cmd_status "$@" ;;
+    -v|--version) echo "imgctl $VERSION" ;;
+    -h|--help|"") usage ;;
+    *) die "Subcomando desconhecido: $_first  (use imgctl --help)" ;;
+esac

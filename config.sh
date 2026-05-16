@@ -7,12 +7,19 @@ WORKSPACE="$HOME/buildenv"
 BACKUP_DIR="$WORKSPACE/backups"
 LOGS_DIR="$WORKSPACE/logs"
 
-IMG_DIR="$WORKSPACE/images"
-IMG_NAME="system"
 SESSION_FILE="$WORKSPACE/.session"
 
+IMGDIR="$WORKSPACE/images"
+IMGNAME="system"
+IMGSIZE="16G"
+IMGFMT="qcow2"
+
 ROOTFS="$ROOTFS"
-BOOTFS="/$ROOTFS/boot"
+ROOTLABEL="BuildLinux"
+
+BOOTFS="$ROOTFS/boot/efi"
+BOOTLABEL="boot"
+BOOTSIZE="512M"
 
 SOURCES="$ROOTFS/sources"
 TOOLCHAIN="$ROOTFS/toolchain"
@@ -33,8 +40,8 @@ fi
 export WORKSPACE
 export BACKUP_DIR
 export LOGS_DIR
-export IMG_DIR
-export IMG_NAME
+export IMGDIR
+export IMGNAME
 export SESSION_FILE
 export ROOTFS
 export BOOTFS
