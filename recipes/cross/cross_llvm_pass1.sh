@@ -1,5 +1,4 @@
-msg_now_building "LLVM (Primeira Passagem)"
-    
+
 fetch_pkg llvm
 extract_pkg llvm
 cd "$SOURCES/build/${PKGDIR[llvm]}"

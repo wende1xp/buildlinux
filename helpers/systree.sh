@@ -1,56 +1,76 @@
+debug_umount_nbd_image(){
+    local imgctl="$SCRIPT_DIR/helpers/imgctl"
+
+    sudo \
+        IMGDIR="$IMGDIR" \
+        IMGNAME="$IMGNAME" \
+        IMGSIZE="$IMGSIZE" \
+        IMGFMT="$IMGFMT" \
+        ROOTFS="$ROOTFS" \
+        ROOTLABEL="$ROOTLABEL" \
+        BOOTLABEL="$BOOTLABEL" \
+        BOOTSIZE="$BOOTSIZE" \
+        "$imgctl" umount
+}
+
+debug_remove_workspace_dir(){
+	rm -rf "$WORKSPACE"
+	exit 1
+}
+
 preparation_workspace() {
-    mkdir -pv \
-        "$WORKSPACE" \
-        "$LOGDIR" \
-        "$BACKUP_DIR" \
-        "$IMGDIR"
+    mkdir -p "$WORKSPACE" "$ROOTFS" "$LOGDIR" "$BACKUP_DIR" "$IMGDIR"
 }
 
 preparation_sysfile(){
 	sudo ROOTFS="$ROOTFS" chmod 755 "$ROOTFS"
 	sudo ROOTFS="$ROOTFS" chown $USER:$USER "$ROOTFS"
 
-	rm -rf "${ROOTFS:?}"/* 
-	mkdir -pv "${ROOTFS:?}"/tmp
+	rm -rf "${ROOTFS:?}"/lost+found 
+	mkdir -p "${ROOTFS:?}"/tmp
 
 	touch "$STATE_BUILD"
 	touch "$STATE_FILE"
 }
+copy_patches(){
+	mkdir -p "$SOURCES"/build
+	cp "$SCRIPT_DIR"/patches/* "$SOURCES"/build
+}
 
 make_minimal_systree() {
-	mkdir -pv "$ROOTFS"/{etc,var} "$ROOTFS"/usr/{bin,lib,lib64,sbin} "$TOOLCHAIN" "$SOURCES"
+	mkdir -p "$ROOTFS"/{etc,var,sources} "$ROOTFS"/sources/build "$ROOTFS"/usr/{bin,lib,lib64,sbin} "$TOOLCHAIN" "$SOURCES"
 
 	for i in bin lib sbin; do
-		ln -sv usr/$i "$ROOTFS"/$i
+		ln -s usr/$i "$ROOTFS"/$i
 	done
 }
 
 make_full_systree() {
-	mkdir -pv /{boot,home,mnt,opt,srv}
+	mkdir -p /{boot,home,mnt,opt,srv}
 
-	mkdir -pv /etc/{opt,sysconfig}
-	mkdir -pv /lib/firmware
-	mkdir -pv /media/{floppy,cdrom}
-	mkdir -pv /usr/{,local/}{include,src}
-	mkdir -pv /usr/lib/locale
-	mkdir -pv /usr/local/{bin,lib,sbin}
-	mkdir -pv /usr/{,local/}share/{color,dict,doc,info,locale,man}
-	mkdir -pv /usr/{,local/}share/{misc,terminfo,zoneinfo}
-	mkdir -pv /usr/{,local/}share/man/man{1..8}
-	mkdir -pv /var/{cache,local,log,mail,opt,spool}
-	mkdir -pv /var/lib/{color,misc,locate}
+	mkdir -p /etc/{opt,sysconfig}
+	mkdir -p /lib/firmware
+	mkdir -p /media/{floppy,cdrom}
+	mkdir -p /usr/{,local/}{include,src}
+	mkdir -p /usr/lib/locale
+	mkdir -p /usr/local/{bin,lib,sbin}
+	mkdir -p /usr/{,local/}share/{color,dict,doc,info,locale,man}
+	mkdir -p /usr/{,local/}share/{misc,terminfo,zoneinfo}
+	mkdir -p /usr/{,local/}share/man/man{1..8}
+	mkdir -p /var/{cache,local,log,mail,opt,spool}
+	mkdir -p /var/lib/{color,misc,locate}
 
-	ln -sfv /run /var/run
-	ln -sfv /run/lock /var/lock
+	ln -sf /run /var/run
+	ln -sf /run/lock /var/lock
 
-	install -dv -m 0750 /root
-	install -dv -m 1777 /tmp /var/tmp
-	ln -sv /proc/self/mounts /etc/mtab
+	install -d -m 0750 /root
+	install -d -m 1777 /tmp /var/tmp
+	ln -s /proc/self/mounts /etc/mtab
 
 	touch /var/log/{btmp,lastlog,faillog,wtmp}
-	chgrp -v utmp /var/log/lastlog
-	chmod -v 664  /var/log/lastlog
-	chmod -v 600  /var/log/btmp
+	chgrp utmp /var/log/lastlog
+	chmod 664  /var/log/lastlog
+	chmod 600  /var/log/btmp
 }
 
 touch_hosts() {

@@ -64,7 +64,7 @@ prepare_environment() {
     if [ -f "$SESSION_FILE" ]; then
         msg "Continuação detectada"
 
-        if ! sudo \
+        if sudo \
             IMGDIR="$IMGDIR" \
             IMGNAME="$IMGNAME" \
             IMGSIZE="$IMGSIZE" \
@@ -73,8 +73,10 @@ prepare_environment() {
             ROOTLABEL="$ROOTLABEL" \
             BOOTLABEL="$BOOTLABEL" \
             BOOTSIZE="$BOOTSIZE" \
-            "$imgctl" mount
+            "$imgctl" mount >/dev/null 2>&1
         then
+            ok "Ambiente existente montado"
+        else
             error "Falha ao montar ambiente existente"
             return 1
         fi
@@ -82,7 +84,7 @@ prepare_environment() {
     else
         msg "Nova build detectada"
 
-        if ! sudo \
+        if sudo \
             IMGDIR="$IMGDIR" \
             IMGNAME="$IMGNAME" \
             IMGSIZE="$IMGSIZE" \
@@ -91,13 +93,14 @@ prepare_environment() {
             ROOTLABEL="$ROOTLABEL" \
             BOOTLABEL="$BOOTLABEL" \
             BOOTSIZE="$BOOTSIZE" \
-            "$imgctl" build
+            "$imgctl" build >/dev/null 2>&1
         then
+            ok "Imagem criada e montada"
+        else
             error "Falha ao criar ambiente"
             return 1
         fi
 
-        touch "$SESSION_FILE"
     fi
 }
 
@@ -105,24 +108,10 @@ clear_image_state() {
     rm -f "$SESSION_FILE"
 }
 
-umount_nbd_image(){
-    local imgctl="$SCRIPT_DIR/helpers/imgctl"
-
-    sudo \
-        IMGDIR="$IMGDIR" \
-        IMGNAME="$IMGNAME" \
-        IMGSIZE="$IMGSIZE" \
-        IMGFMT="$IMGFMT" \
-        ROOTFS="$ROOTFS" \
-        ROOTLABEL="$ROOTLABEL" \
-        BOOTLABEL="$BOOTLABEL" \
-        BOOTSIZE="$BOOTSIZE" \
-        "$imgctl" umount
-}
-
 build_interloper() {
     local name="$1"
-    local script="$2"
+    local package="$2"
+    local script="$3"
 
     local script_name
     script_name="$(basename "$script" .sh)"
@@ -153,7 +142,7 @@ build_interloper() {
     fi
 
     if grep -qE "^${state}=1(\r)?$" "$state_file" 2>/dev/null; then
-        msg "$name já compilado"
+        skip "$name já foi compilado"
 
         flock -u 9
         exec 9>&-
@@ -187,11 +176,22 @@ build_interloper() {
         return 0
     fi
 
-    echo
-    [ -f "$logfile" ] && tail -n 20 "$logfile"
-    echo
+    local build_dir=""
+
+    if [[ -n "${PKGDIR[$package]:-}" ]]; then
+        build_dir="$SOURCES/build/${PKGDIR[$package]}"
+
+        if [[ -d "$build_dir" ]]; then
+            warn "Removendo o diretório $build_dir..."
+            rm -rf "$build_dir"
+        fi
+    fi
 
     error "Falha na compilação do $name"
+
+    log "Últimas 20 linhas do log: "
+    [ -f "$logfile" ] && tail -n 20 "$logfile"
+    log "Fim do log: "
 
     flock -u 9
     exec 9>&-

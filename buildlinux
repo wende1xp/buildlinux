@@ -8,21 +8,172 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/helpers/check_requirements.sh"
 . "$SCRIPT_DIR/helpers/utils.sh"
 . "$SCRIPT_DIR/helpers/systree.sh"
+. "$SCRIPT_DIR/helpers/build_presets.sh"
+
+build_cross_toolchain(){
+    build_interloper "Cabeçalhos do Kernel Linux" linux "$SCRIPT_DIR/recipes/cross/cross_linux_headers.sh"
+    build_interloper "Cabeçalhos do Musl" musl "$SCRIPT_DIR/recipes/cross/cross_musl_headers.sh"
+    build_interloper "Primeira Passagem do LLVM" llvm "$SCRIPT_DIR/recipes/cross/cross_llvm_pass1.sh"
+    build_interloper "Musl" musl "$SCRIPT_DIR/recipes/cross/cross_musl.sh"
+    build_interloper "Runtimes do LLVM" llvm "$SCRIPT_DIR/recipes/cross/cross_llvm_runtimes.sh"
+}
+
+build_temporary_tools(){
+    :
+}
+
+fetch_cross_toolchain_pkgs() {
+    fetch_pkg llvm
+    fetch_pkg linux
+    fetch_pkg musl
+    fetch_pkg mimalloc
+}
+
+fetch_temporary_tools_pkgs() {
+    :
+}
+
+## bugs
+# por algum motivo .has_image é excluido
+# falta checkpoints ao final de cada fase
 
 info
 
+#debug_umount_nbd_image
+#debug_remove_workspace_dir
 
-#umount_nbd_image
+from_begin(){
+    preparation_workspace
+    prepare_environment
+    load_manifest
+    preparation_sysfile
+    make_minimal_systree
+    copy_patches
+    build_cross_toolchain
+}
 
-preparation_workspace
-prepare_environment
+usage() {
+    echo ""
+    echo "  Uso: $0 <flag>"
+    echo ""
+    echo "  Flags disponíveis:"
+    echo "    --build-all                Constrói tudo em sequência"
+    echo "    --build-cross-toolchain    Constrói apenas a suíte de ferramentas cruzadas"
+    echo "    --build-temp-tools         Constrói apenas as ferramentas temporárias"
+    echo ""
+    echo "    --fetch-cross-pkgs         Baixa apenas os sources da suíte de ferramentas cruzadas"
+    echo "    --fetch-temp-pkgs          Baixa apenas os sources das ferramentas temporárias"
+    echo "    --fetch-all-pkgs           Baixa todos os sources"
+    echo "    --fetch-patches            Apenas baixa os patches"
+    echo ""
+    echo "    --llvm-stage1              LLVM (Primeira Passagem)"
+    echo "    --musl-headers             Cabeçalhos do Musl"
+    echo "    --compiler-rt              compiler-rt"
+    echo "    --linux-headers            Cabeçalhos do Kernel Linux"
+    echo "    --musl                     Musl"
+    echo "    --libatomic                libatomic-chimera"
+    echo "    --llvm-runtimes            Runtimes do Clang"
+    echo ""
+    echo "    --bison                    bison"
+    echo "    --flex                     flex"
+    echo "    --ncurses                  ncurses"
+    echo "    --bash                     bash"
+    echo "    --m4                       m4"
+    echo "    --coreutils                coreutils"
+    echo "    --diffutils                diffutils"
+    echo "    --file                     file"
+    echo "    --findutils                findutils"
+    echo "    --gawk                     gawk"
+    echo "    --grep                     grep"
+    echo "    --gzip                     gzip"
+    echo "    --xz                       xz"
+    echo "    --make                     make"
+    echo "    --patch                    patch"
+    echo "    --sed                      sed"
+    echo "    --tar                      tar"
+    echo "    --llvm-stage2              LLVM (Segunda Passagem)"
+    echo ""
+    echo "    --help                     Exibe isto"
+    echo ""
+    exit 0
+}
 
-preparation_sysfile
+if [ $# -eq 0 ]; then
+    usage
+fi
 
-file_interloper "Criando uma árvore de diretórios mínima" make_minimal_systree
+case "$1" in
+    --from-begin)
+        from_begin
+        msg "✓ Compilação concluída com sucesso."
+        ;;
+        
+    --copy-patches)
+        copy_patches
+        msg "✓ Compilação concluída com sucesso."
+        ;;
 
-build_interloper "Cabeçalhos do Kernel Linux" "$SCRIPT_DIR/recipes/phase1/cross_linux_headers.sh"
+    --build-cross-toolchain)
+        build_cross_toolchain
+        msg "✓ Compilação concluída com sucesso."
+        ;;
 
-build_interloper "Cabeçalhos do Musl" "$SCRIPT_DIR/recipes/phase1/cross_musl_headers.sh"
+    --build-temp-tools)
+        build_temporary_tools
+        banner "✓ Compilação concluída com sucesso."
+        ;;
 
-echo "passou"
+    --build-all)
+        build_cross_toolchain
+        build_temporary_tools
+        banner "✓ Compilação concluída com sucesso."
+        ;;
+
+    --fetch-all-pkgs)
+        fetch_cross_toolchain_pkgs
+        fetch_temporary_tools_pkgs
+        banner "✓ Downloads concluídos com sucesso."
+        ;;
+
+    --fetch-cross-pkgs)         fetch_cross_toolchain_pkgs ;;
+    --fetch-temp-pkgs)          fetch_temporary_tools_pkgs ;;
+    --fetch-patches)            fetch_patches ;;
+
+    --debug-umount-nbd-image)   debug_umount_nbd_image ;;
+    --musl-headers)             build_musl_headers ;;
+    --compiler-rt)              build_compiler_rt ;;
+    --linux-headers)            build_linux_headers ;;
+    --musl)                     build_musl ;;
+    --libatomic)                build_libatomic ;;
+    --llvm-runtimes)            build_llvm_runtimes ;;
+
+    --bison)                    build_bison ;;
+    --flex)                     build_flex ;;
+    --ncurses)                  build_ncurses ;;
+    --bash)                     build_bash ;;
+    --m4)                       build_m4 ;;
+    --coreutils)                build_coreutils ;;
+    --diffutils)                build_diffutils ;;
+    --file)                     build_file ;;
+    --findutils)                build_findutils ;;
+    --gawk)                     build_gawk ;;
+    --grep)                     build_grep ;;
+    --gzip)                     build_gzip ;;
+    --xz)                       build_xz ;;
+    --make)                     build_make ;;
+    --patch)                    build_patch ;;
+    --sed)                      build_sed ;;
+    --tar)                      build_tar ;;
+    --llvm-stage2)              build_llvm_stage2 ;;
+
+    --help|-h)
+        usage
+        ;;
+
+    *)
+        usage
+        echo ""
+        echo "Flag desconhecida: $1"
+        exit 1
+        ;;
+esac
